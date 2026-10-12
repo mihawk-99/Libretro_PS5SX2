@@ -17,6 +17,7 @@
 
 #include "libretro.h"
 #include "libretro_core.h"
+#include "libretro_core_options.h"
 #include "libretro_gs.h"
 #include "libretro_host.h"
 
@@ -91,28 +92,7 @@ void lr_osd(const std::string& message, float seconds)
 	environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE_EXT, &msg);
 }
 
-// Core options.
-static retro_core_option_v2_category s_option_categories[] = {
-	{"video", "Video", "Resolution and picture."},
-	{"system", "System", "BIOS and start-up."},
-	{nullptr, nullptr, nullptr},
-};
-
-static retro_core_option_v2_definition s_option_definitions[] = {
-	{"ps5sx2_upscale", "Internal Resolution", nullptr,
-		"How many times the PS2's resolution the hardware renderer draws at.", nullptr, "video",
-		{{"1", "Native (PS2)"}, {"2", "2x (~720p)"}, {"3", "3x (~1080p)"}, {"4", "4x (~1440p)"}, {nullptr, nullptr}}, "2"},
-	{"ps5sx2_aspect", "Aspect Ratio", nullptr, "The shape of the picture.", nullptr, "video",
-		{{"4:3", "4:3"}, {"16:9", "16:9"}, {nullptr, nullptr}}, "4:3"},
-	{"ps5sx2_renderer", "Renderer", nullptr, "Hardware draws on the GPU; Software is slower and more accurate.", nullptr, "video",
-		{{"hardware", "Hardware (Vulkan)"}, {"software", "Software"}, {nullptr, nullptr}}, "hardware"},
-	{"ps5sx2_fast_boot", "Fast Boot", nullptr, "Skip the BIOS intro and start the game directly.", nullptr, "system",
-		{{"enabled", "On"}, {"disabled", "Off"}, {nullptr, nullptr}}, "enabled"},
-	{nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, {{nullptr, nullptr}}, nullptr},
-};
-
-static retro_core_options_v2 s_options = {s_option_categories, s_option_definitions};
-
+// Core options (libretro_core_options.h).
 static std::string option(const char* key, const char* fallback)
 {
 	retro_variable var = {key, nullptr};
@@ -452,7 +432,7 @@ LR_EXPORT void retro_set_environment(retro_environment_t cb)
 		log_cb = logging.log;
 	unsigned version = 0;
 	if (cb(RETRO_ENVIRONMENT_GET_CORE_OPTIONS_VERSION, &version) && version >= 2)
-		cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2, &s_options);
+		cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2, &options_us);
 	static const retro_controller_description pads[] = {{"DualShock 2", RETRO_DEVICE_ANALOG}};
 	static const retro_controller_info ports[] = {{pads, 1}, {pads, 1}, {nullptr, 0}};
 	cb(RETRO_ENVIRONMENT_SET_CONTROLLER_INFO, const_cast<retro_controller_info*>(ports));
