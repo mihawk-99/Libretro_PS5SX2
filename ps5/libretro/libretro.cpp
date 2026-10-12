@@ -338,6 +338,32 @@ static void cpu_thread_main()
 	VMManager::Internal::CPUThreadShutdown();
 }
 
+// RetroAchievements (RetroArch's rcheevos): the PS2's memory as rcheevos maps it, main RAM
+// at 0 and the scratchpad at 0x70000000. The emulator allocates it as it boots, inside
+// create_device, so the map is published then; RetroArch reads it when the game's
+// achievements arrive, and the core's memory stays where it is until the game is unloaded.
+static void publish_memory_map()
+{
+	if (!eeMem)
+		return;
+	static retro_memory_descriptor descriptors[2];
+	std::memset(descriptors, 0, sizeof(descriptors));
+	descriptors[0].flags = RETRO_MEMDESC_SYSTEM_RAM;
+	descriptors[0].ptr = eeMem->Main;
+	descriptors[0].start = 0;
+	descriptors[0].len = Ps2MemSize::MainRam;
+	descriptors[0].addrspace = "EE";
+	descriptors[1].flags = RETRO_MEMDESC_SYSTEM_RAM;
+	descriptors[1].ptr = eeMem->Scratch;
+	descriptors[1].start = 0x70000000;
+	descriptors[1].len = Ps2MemSize::Scratch;
+	descriptors[1].addrspace = "SPR";
+	retro_memory_map map = {descriptors, 2};
+	environ_cb(RETRO_ENVIRONMENT_SET_MEMORY_MAPS, &map);
+	lr_logf(LR_LOG_INFO, "achievements: main RAM %p (%u MiB) and scratchpad %p mapped", eeMem->Main,
+		Ps2MemSize::MainRam >> 20, eeMem->Scratch);
+}
+
 // RetroArch's create_device: boots the emulator, whose GS creates the device; or, when it
 // runs already and RetroArch made a new context, opens the GS again on it.
 static bool open_gs()
@@ -361,9 +387,14 @@ static bool open_gs()
 		lr_logf(LR_LOG_ERROR, "the CPU thread did not start");
 		return false;
 	}
-	std::unique_lock<std::mutex> lock(s_cpu_mutex);
-	s_cpu_cv.wait(lock, [] { return s_boot != Boot::None; });
-	return s_boot == Boot::Running;
+	{
+		std::unique_lock<std::mutex> lock(s_cpu_mutex);
+		s_cpu_cv.wait(lock, [] { return s_boot != Boot::None; });
+		if (s_boot != Boot::Running)
+			return false;
+	}
+	publish_memory_map();
+	return true;
 }
 
 static void stop_emulation()
@@ -542,6 +573,8 @@ LR_EXPORT bool retro_load_game(const retro_game_info* game)
 		lr_logf(LR_LOG_ERROR, "RetroArch has no Vulkan context for the core");
 		return false;
 	}
+	bool achievements = true;
+	environ_cb(RETRO_ENVIRONMENT_SET_SUPPORT_ACHIEVEMENTS, &achievements);
 	lr_vk_set_open_gs(open_gs);
 	lr_vk_negotiate(environ_cb);
 	lr_logf(LR_LOG_INFO, "loading %s with BIOS %s", s_game_path.c_str(), bios.c_str());
