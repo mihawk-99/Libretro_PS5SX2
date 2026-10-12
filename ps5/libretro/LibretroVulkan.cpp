@@ -211,6 +211,22 @@ VkPhysicalDevice LibretroGS::PhysicalDevice()
 	return s_gpu;
 }
 
+bool LibretroGS::DriverIsRADV()
+{
+	static int radv = -1;
+	if (radv < 0 && s_frontend_gipa && s_instance != VK_NULL_HANDLE && s_gpu != VK_NULL_HANDLE)
+	{
+		const auto properties = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(
+			s_frontend_gipa(s_instance, "vkGetPhysicalDeviceProperties"));
+		VkPhysicalDeviceProperties p = {};
+		if (properties)
+			properties(s_gpu, &p);
+		radv = std::strstr(p.deviceName, "RADV") != nullptr;
+		lr_logf(LR_LOG_INFO, "vulkan: %s (%s)", p.deviceName, radv ? "RADV" : "ps5vk");
+	}
+	return radv > 0;
+}
+
 PFN_vkVoidFunction VKAPI_CALL LibretroGS::GetInstanceProcAddr(VkInstance instance, const char* name)
 {
 	return s_frontend_gipa ? wrap(name, s_frontend_gipa(instance, name)) : nullptr;

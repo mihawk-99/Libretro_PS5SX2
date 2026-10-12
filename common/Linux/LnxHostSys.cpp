@@ -347,6 +347,11 @@ namespace PageFaultHandler
 
 #endif // ARCH_ARM64
 
+#ifdef LIBRETRO
+// Libretro_PS5SX2: RetroArch's own SIGSEGV handler, for the faults that are not PCSX2's.
+static struct sigaction s_previous_sigsegv;
+#endif
+
 namespace PageFaultHandler
 {
 	static void SignalHandler(int sig, siginfo_t* info, void* ctx);
@@ -463,6 +468,15 @@ void PageFaultHandler::SignalHandler(int sig, siginfo_t* info, void* ctx)
 		return;
 
 	// We couldn't handle it. Pass it off to the crash dumper.
+#ifdef LIBRETRO
+	// Libretro_PS5SX2: the process is RetroArch's. The handler that was there before takes
+	// the fault: put it back and return, and the instruction faults again into it.
+	if (sig == SIGSEGV)
+	{
+		sigaction(SIGSEGV, &s_previous_sigsegv, nullptr);
+		return;
+	}
+#endif
 	{
 		FILE* f = fopen(g_orbis_pf_log, "a");
 		if (f)
@@ -497,7 +511,11 @@ bool PageFaultHandler::Install(Error* error)
 	sa.sa_flags = SA_SIGINFO | SA_NODEFER;
 	sa.sa_sigaction = SignalHandler;
 
+#ifdef LIBRETRO
+	if (sigaction(SIGSEGV, &sa, &s_previous_sigsegv) != 0)
+#else
 	if (sigaction(SIGSEGV, &sa, nullptr) != 0)
+#endif
 	{
 		Error::SetErrno(error, "sigaction() for SIGSEGV failed: ", errno);
 		return false;

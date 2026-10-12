@@ -20,6 +20,9 @@ namespace LibretroGS
 VkInstance Instance();
 VkPhysicalDevice PhysicalDevice();
 
+// Whether RetroArch's driver is RADV (rather than ps5vk), from the GPU's name.
+bool DriverIsRADV();
+
 // vkGetInstanceProcAddr for the core: RetroArch's, with vkCreateDevice adding what
 // RetroArch requires of the device and the queue calls taking RetroArch's queue lock.
 PFN_vkVoidFunction VKAPI_CALL GetInstanceProcAddr(VkInstance instance, const char* name);

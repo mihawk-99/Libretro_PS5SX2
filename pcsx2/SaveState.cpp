@@ -1093,28 +1093,9 @@ bool SaveState_ReadScreenshot(const std::string& filename, u32* out_width, u32* 
 	return false; // eerec-282: no screenshots
 }
 
-bool SaveState_UnzipFromDisk(const std::string& filename, Error* error)
+// The flat state's entries, read from memory (a file's bytes, or a libretro frontend's buffer).
+static bool OrbisLoadState(const std::vector<u8>& file, const std::string& filename, Error* error)
 {
-	std::vector<u8> file;
-	if (std::FILE* fp = std::fopen(filename.c_str(), "rb"))
-	{
-		std::fseek(fp, 0, SEEK_END);
-		const long len = std::ftell(fp);
-		std::fseek(fp, 0, SEEK_SET);
-		if (len > 0)
-		{
-			file.resize(static_cast<size_t>(len));
-			if (std::fread(file.data(), 1, file.size(), fp) != file.size())
-				file.clear();
-		}
-		std::fclose(fp);
-	}
-	else
-	{
-		Error::SetString(error, "Savestate file does not exist.");
-		return false;
-	}
-
 	struct OrbisStateEntry
 	{
 		std::string name;
@@ -1228,6 +1209,73 @@ bool SaveState_UnzipFromDisk(const std::string& filename, Error* error)
 	std::fflush(stdout);
 	return true;
 }
+
+bool SaveState_UnzipFromDisk(const std::string& filename, Error* error)
+{
+	std::vector<u8> file;
+	if (std::FILE* fp = std::fopen(filename.c_str(), "rb"))
+	{
+		std::fseek(fp, 0, SEEK_END);
+		const long len = std::ftell(fp);
+		std::fseek(fp, 0, SEEK_SET);
+		if (len > 0)
+		{
+			file.resize(static_cast<size_t>(len));
+			if (std::fread(file.data(), 1, file.size(), fp) != file.size())
+				file.clear();
+		}
+		std::fclose(fp);
+	}
+	else
+	{
+		Error::SetString(error, "Savestate file does not exist.");
+		return false;
+	}
+
+	return OrbisLoadState(file, filename, error);
+}
+
+#ifdef LIBRETRO
+// Libretro_PS5SX2: a state in memory, in the flat file's format (retro_serialize).
+bool SaveState_SaveToBuffer(std::vector<u8>& out, Error* error)
+{
+	std::unique_ptr<ArchiveEntryList> srclist = SaveState_DownloadState(error);
+	if (!srclist)
+		return false;
+	out.clear();
+	const auto put = [&out](const void* p, size_t n) {
+		const u8* bytes = static_cast<const u8*>(p);
+		out.insert(out.end(), bytes, bytes + n);
+	};
+	u32 count = 0;
+	for (uint i = 0; i < static_cast<uint>(srclist->GetLength()); i++)
+		count += ((*srclist)[i].GetDataSize() != 0) ? 1u : 0u;
+	const u32 version = g_SaveVersion;
+	put(ORBIS_STATE_MAGIC, sizeof(ORBIS_STATE_MAGIC));
+	put(&version, sizeof(version));
+	put(&count, sizeof(count));
+	for (uint i = 0; i < static_cast<uint>(srclist->GetLength()); i++)
+	{
+		const ArchiveEntry& entry = (*srclist)[i];
+		if (!entry.GetDataSize())
+			continue;
+		const std::string& name = entry.GetFilename();
+		const u32 name_len = static_cast<u32>(name.size());
+		const u64 size = entry.GetDataSize();
+		put(&name_len, sizeof(name_len));
+		put(name.data(), name_len);
+		put(&size, sizeof(size));
+		put(srclist->GetPtr(static_cast<uint>(entry.GetDataIndex())), static_cast<size_t>(size));
+	}
+	return true;
+}
+
+bool SaveState_LoadFromBuffer(const void* data, size_t size, Error* error)
+{
+	const u8* bytes = static_cast<const u8*>(data);
+	return OrbisLoadState(std::vector<u8>(bytes, bytes + size), "(libretro)", error);
+}
+#endif
 
 void SaveState_ReportLoadErrorOSD(const std::string& message, std::optional<s32> slot, bool backup)
 {

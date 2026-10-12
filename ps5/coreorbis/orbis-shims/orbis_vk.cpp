@@ -36,9 +36,19 @@ void OrbisSampleWindow()
 // mihawk-99's RADV archive; in a ps5vk eboot the weak reference is resolved to null at link time.
 extern "C" void* radv_GetInstanceProcAddr(void* instance, const char* name) __attribute__((weak));
 
+#ifdef LIBRETRO
+#include "libretro_gs.h"
+#endif
+
 bool OrbisDriverIsRADV()
 {
+#ifdef LIBRETRO
+	// Libretro_PS5SX2: the driver is the one linked into PS5 RetroArch's eboot, named by
+	// the GPU RetroArch chose (ps5/libretro/LibretroVulkan.cpp).
+	return LibretroGS::DriverIsRADV();
+#else
 	return radv_GetInstanceProcAddr != nullptr;
+#endif
 }
 
 const char* OrbisDriverName()

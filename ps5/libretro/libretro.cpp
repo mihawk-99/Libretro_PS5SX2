@@ -32,6 +32,7 @@
 #include "pcsx2/MTGS.h"
 #include "pcsx2/Memory.h"
 #include "pcsx2/SIO/Pad/Pad.h"
+#include "pcsx2/SaveState.h"
 #include "pcsx2/SIO/Pad/PadDualshock2.h"
 #include "pcsx2/VMManager.h"
 #include "pcsx2/ps2/BiosTools.h"
@@ -133,12 +134,14 @@ static void find_folders()
 	s_bios_dir = Path::Combine(s_system_dir, "pcsx2/bios");
 }
 
-// The BIOS: the one matching the game's region when there are several, else any.
+// The BIOS: the newest USA one when there is one (most dumps of a set are a region's
+// revisions), else the newest of any region.
 static std::string pick_bios()
 {
 	FileSystem::FindResultsArray files;
 	FileSystem::FindFiles(s_bios_dir.c_str(), "*", FILESYSTEM_FIND_FILES | FILESYSTEM_FIND_HIDDEN_FILES, &files);
 	std::string any, usa;
+	u32 any_version = 0, usa_version = 0;
 	for (const FILESYSTEM_FIND_DATA& fd : files)
 	{
 		u32 version = 0, region = 0;
@@ -146,11 +149,16 @@ static std::string pick_bios()
 		if (fd.Size < 4 * 1024 * 1024 || !IsBIOS(fd.FileName.c_str(), version, description, region, zone))
 			continue;
 		const std::string name(Path::GetFileName(fd.FileName));
-		lr_logf(LR_LOG_INFO, "BIOS: %s (%s)", name.c_str(), description.c_str());
-		if (any.empty())
+		if (any.empty() || version > any_version)
+		{
 			any = name;
-		if (usa.empty() && zone == "USA")
+			any_version = version;
+		}
+		if (zone == "USA" && (usa.empty() || version > usa_version))
+		{
 			usa = name;
+			usa_version = version;
+		}
 	}
 	return usa.empty() ? any : usa;
 }
@@ -644,19 +652,59 @@ LR_EXPORT void retro_run(void)
 		audio_batch_cb(samples, frames);
 }
 
+// Save states: PCSX2's state in the flat format PS5SX2 writes to files, made and read on
+// the CPU thread between frames. RetroArch asks for the size before each state and wants
+// it stable, so the first state's size, with room to spare, is the size from then on.
+static size_t s_state_size = 0;
+
+static bool save_state(std::vector<u8>& out)
+{
+	if (s_boot != Boot::Running || !s_go)
+		return false;
+	bool ok = false;
+	Error err;
+	run_on_cpu_and_wait([&]() { ok = SaveState_SaveToBuffer(out, &err); });
+	if (!ok)
+		lr_logf(LR_LOG_ERROR, "save state: %s", err.GetDescription().c_str());
+	return ok;
+}
+
 LR_EXPORT size_t retro_serialize_size(void)
 {
-	return 0;
+	if (s_state_size == 0)
+	{
+		std::vector<u8> state;
+		if (save_state(state))
+			s_state_size = state.size() + 4 * 1024 * 1024;
+	}
+	return s_state_size;
 }
 
-LR_EXPORT bool retro_serialize(void*, size_t)
+LR_EXPORT bool retro_serialize(void* data, size_t size)
 {
-	return false;
+	std::vector<u8> state;
+	if (!save_state(state))
+		return false;
+	if (state.size() > size)
+	{
+		lr_logf(LR_LOG_ERROR, "save state: %zu bytes, RetroArch has room for %zu", state.size(), size);
+		return false;
+	}
+	std::memcpy(data, state.data(), state.size());
+	std::memset(static_cast<u8*>(data) + state.size(), 0, size - state.size());
+	return true;
 }
 
-LR_EXPORT bool retro_unserialize(const void*, size_t)
+LR_EXPORT bool retro_unserialize(const void* data, size_t size)
 {
-	return false;
+	if (s_boot != Boot::Running || !s_go)
+		return false;
+	bool ok = false;
+	Error err;
+	run_on_cpu_and_wait([&]() { ok = SaveState_LoadFromBuffer(data, size, &err); });
+	if (!ok)
+		lr_logf(LR_LOG_ERROR, "load state: %s", err.GetDescription().c_str());
+	return ok;
 }
 
 LR_EXPORT void retro_cheat_reset(void)

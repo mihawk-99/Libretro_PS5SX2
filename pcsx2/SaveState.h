@@ -59,6 +59,11 @@ extern bool SaveState_ZipToDisk(
 	const char* filename, Error* error);
 extern bool SaveState_ReadScreenshot(const std::string& filename, u32* out_width, u32* out_height, std::vector<u32>* out_pixels);
 extern bool SaveState_UnzipFromDisk(const std::string& filename, Error* error);
+#ifdef LIBRETRO
+// Libretro_PS5SX2: a state in memory, in the same flat format as a state file.
+extern bool SaveState_SaveToBuffer(std::vector<u8>& out, Error* error);
+extern bool SaveState_LoadFromBuffer(const void* data, size_t size, Error* error);
+#endif
 
 // --------------------------------------------------------------------------------------
 //  SaveStateBase class
