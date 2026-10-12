@@ -265,6 +265,13 @@ void LibretroGS::ReleaseHandoverSlot(int slot)
 void LibretroGS::PublishHandoverSlot(int slot, VkImage image, VkImageView view, VkFormat format, unsigned width, unsigned height)
 {
 	std::lock_guard<std::mutex> lock(s_slots_mutex);
+	static unsigned last_width = 0, last_height = 0;
+	if (width != last_width || height != last_height)
+	{
+		lr_logf(LR_LOG_INFO, "video: frames of %ux%u", width, height);
+		last_width = width;
+		last_height = height;
+	}
 	Slot& s = s_slots[slot];
 	s.width = width;
 	s.height = height;
