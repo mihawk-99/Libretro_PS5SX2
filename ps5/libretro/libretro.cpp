@@ -147,7 +147,7 @@ static MemorySettingsInterface s_settings;
 
 static void apply_options(SettingsInterface& si)
 {
-	const int upscale = std::clamp(std::atoi(option("ps5sx2_upscale", "2").c_str()), 1, 4);
+	const int upscale = std::clamp(std::atoi(option("ps5sx2_upscale", "2").c_str()), 1, 8);
 	si.SetFloatValue("EmuCore/GS", "upscale_multiplier", static_cast<float>(upscale));
 	const bool software = option("ps5sx2_renderer", "hardware") == "software";
 	si.SetIntValue("EmuCore/GS", "Renderer", static_cast<int>(software ? GSRendererType::SW : GSRendererType::VK));
@@ -484,7 +484,7 @@ LR_EXPORT void retro_get_system_info(retro_system_info* info)
 
 LR_EXPORT void retro_get_system_av_info(retro_system_av_info* info)
 {
-	const int upscale = std::clamp(std::atoi(option("ps5sx2_upscale", "2").c_str()), 1, 4);
+	const int upscale = std::clamp(std::atoi(option("ps5sx2_upscale", "2").c_str()), 1, 8);
 	std::memset(info, 0, sizeof(*info));
 	info->geometry.base_width = 640 * upscale;
 	info->geometry.base_height = 448 * upscale;

@@ -17,7 +17,8 @@ static retro_core_option_v2_category option_cats_us[] = {
 static retro_core_option_v2_definition option_defs_us[] = {
 	{"ps5sx2_upscale", "Internal Resolution", nullptr,
 		"How many times the PS2's resolution the hardware renderer draws at.", nullptr, "video",
-		{{"1", "Native (PS2)"}, {"2", "2x (~720p)"}, {"3", "3x (~1080p)"}, {"4", "4x (~1440p)"}, {nullptr, nullptr}}, "2"},
+		{{"1", "Native (PS2)"}, {"2", "2x (~720p)"}, {"3", "3x (~1080p)"}, {"4", "4x (~1440p)"}, {"5", "5x (~1800p)"}, {"6", "6x (~2160p, 4K)"},
+			{"8", "8x (~2880p)"}, {nullptr, nullptr}}, "2"},
 	{"ps5sx2_aspect", "Aspect Ratio", nullptr, "The shape of the picture.", nullptr, "video",
 		{{"4:3", "4:3"}, {"16:9", "16:9"}, {nullptr, nullptr}}, "4:3"},
 	{"ps5sx2_renderer", "Renderer", nullptr, "Hardware draws on the GPU; Software is slower and more accurate.", nullptr, "video",
