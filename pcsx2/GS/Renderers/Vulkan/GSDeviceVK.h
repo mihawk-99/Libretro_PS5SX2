@@ -583,6 +583,11 @@ public:
 	void SetVSyncMode(GSVSyncMode mode, bool allow_present_throttle) override;
 
 	PresentResult BeginPresent(bool frame_skip) override;
+#ifdef LIBRETRO
+	// Libretro_PS5SX2: the frame to RetroArch instead of a swap chain (GSDeviceVK.cpp).
+	bool LibretroHandOver();
+	void LibretroDestroyHandover();
+#endif
 	void EndPresent() override;
 	bool IsPresenting() const;
 

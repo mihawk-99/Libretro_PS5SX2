@@ -8,6 +8,9 @@
 #include "GS/GSUtil.h"
 #include "GS/Renderers/Vulkan/GSDeviceVK.h"
 #include "GS/Renderers/Vulkan/VKBuilders.h"
+#ifdef LIBRETRO
+#include "libretro_gs.h"
+#endif
 #include "GS/Renderers/Vulkan/VKShaderCache.h"
 #include "GS/Renderers/Vulkan/VKSwapChain.h"
 #include "GS/Renderers/Common/GSDevice.h"
@@ -3598,6 +3601,9 @@ void GSDeviceVK::Destroy()
 	OrbisFrameGenRelease(); // its images and pipelines before the device (2026-10-08)
 #endif
 	m_swap_chain.reset();
+#ifdef LIBRETRO
+	LibretroDestroyHandover();
+#endif
 
 	if (m_device != VK_NULL_HANDLE)
 	{
@@ -3607,6 +3613,11 @@ void GSDeviceVK::Destroy()
 
 	VKShaderCache::Destroy();
 
+#ifdef LIBRETRO
+	// Libretro_PS5SX2: RetroArch destroys the device it was given, and its instance.
+	m_device = VK_NULL_HANDLE;
+	m_instance = VK_NULL_HANDLE;
+#else
 	if (m_device != VK_NULL_HANDLE)
 		vkDestroyDevice(m_device, nullptr);
 
@@ -3615,6 +3626,7 @@ void GSDeviceVK::Destroy()
 
 	if (m_instance != VK_NULL_HANDLE)
 		vkDestroyInstance(m_instance, nullptr);
+#endif
 
 	Vulkan::UnloadVulkanLibrary();
 }
@@ -3762,6 +3774,52 @@ void GSDeviceVK::SetVSyncMode(GSVSyncMode mode, bool allow_present_throttle)
 	}
 }
 
+#ifdef LIBRETRO
+// Libretro_PS5SX2 (ps5/libretro/libretro_gs.h): the frame is copied into a handover image
+// of its own, which RetroArch reads on its own schedule while the GS goes on rendering.
+static GSTexture* s_lr_handover[LibretroGS::HANDOVER_SLOTS];
+
+bool GSDeviceVK::LibretroHandOver()
+{
+	GSTextureVK* const current = static_cast<GSTextureVK*>(m_current);
+	if (!current)
+		return false;
+	const int slot = LibretroGS::AcquireHandoverSlot();
+	if (slot < 0)
+		return false;
+	const int width = current->GetWidth(), height = current->GetHeight();
+	GSTexture*& target = s_lr_handover[slot];
+	if (target && (target->GetWidth() != width || target->GetHeight() != height))
+	{
+		delete target; // GSTextureVK defers the image's destruction until the GPU is done with it
+		target = nullptr;
+	}
+	if (!target)
+		target = CreateSurface(GSTexture::Usage::RenderTarget, width, height, 1, GSTexture::Format::Color);
+	if (!target)
+	{
+		LibretroGS::ReleaseHandoverSlot(slot);
+		return false;
+	}
+	StretchRect(current, target, GSVector4(0, 0, width, height), ShaderConvert::COPY, Filter::Nearest);
+	EndRenderPass();
+	GSTextureVK* const vk_target = static_cast<GSTextureVK*>(target);
+	vk_target->TransitionToLayout(GetCurrentCommandBuffer(), GSTextureVK::Layout::ShaderReadOnly);
+	ExecuteCommandBuffer(false);
+	LibretroGS::PublishHandoverSlot(slot, vk_target->GetImage(), vk_target->GetView(), vk_target->GetVkFormat(), width, height);
+	return true;
+}
+
+void GSDeviceVK::LibretroDestroyHandover()
+{
+	for (GSTexture*& target : s_lr_handover)
+	{
+		delete target;
+		target = nullptr;
+	}
+}
+#endif
+
 GSDevice::PresentResult GSDeviceVK::BeginPresent(bool frame_skip)
 {
 	EndRenderPass();
@@ -3776,6 +3834,11 @@ GSDevice::PresentResult GSDeviceVK::BeginPresent(bool frame_skip)
 	// If we're running surfaceless, kick the command buffer so we don't run out of descriptors.
 	if (!m_swap_chain)
 	{
+#ifdef LIBRETRO
+		// Libretro_PS5SX2: no window; the finished frame goes to RetroArch.
+		if (LibretroHandOver())
+			return PresentResult::FrameSkipped;
+#endif
 		ExecuteCommandBuffer(false);
 		return PresentResult::FrameSkipped;
 	}
@@ -3980,7 +4043,20 @@ bool GSDeviceVK::CreateDeviceAndSwapChain()
 	if (!AcquireWindow(true))
 		return false;
 
+#ifdef LIBRETRO
+	// Libretro_PS5SX2: RetroArch's instance (ps5/libretro/LibretroVulkan.cpp), which it owns;
+	// no debug messenger on an instance the core did not create.
+	enable_debug_utils = false;
+	enable_validation_layer = false;
+	m_instance = LibretroGS::Instance();
+	if (m_instance == VK_NULL_HANDLE)
+	{
+		Host::ReportErrorAsync("Error", "RetroArch gave the core no Vulkan instance.");
+		return false;
+	}
+#else
 	m_instance = CreateVulkanInstance(m_window_info, &m_optional_extensions, enable_debug_utils, enable_validation_layer);
+#endif
 	if (m_instance == VK_NULL_HANDLE)
 	{
 		if (enable_debug_utils || enable_validation_layer)
@@ -4013,6 +4089,12 @@ bool GSDeviceVK::CreateDeviceAndSwapChain()
 	}
 
 	const bool is_default_gpu = GSConfig.Adapter == GetDefaultAdapter();
+#ifdef LIBRETRO
+	// The GPU RetroArch chose, when it chose one.
+	if (LibretroGS::PhysicalDevice() != VK_NULL_HANDLE)
+		m_physical_device = LibretroGS::PhysicalDevice();
+	else
+#endif
 	if (!(GSConfig.Adapter.empty() || is_default_gpu))
 	{
 		u32 gpu_index = 0;

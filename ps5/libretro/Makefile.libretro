@@ -1,0 +1,77 @@
+# Libretro_PS5SX2: PS5SX2's emulator as a libretro core for PS5 RetroArch.
+#
+#   make -C ps5/coreorbis -f ../libretro/Makefile.libretro -j2 \
+#        PS5_PAYLOAD_SDK=... RYML=... GLSLANG=... GLSLANG_BUILD=... SHADERC_INCLUDE=... \
+#        CORE_LDSCRIPT=.../ps5-core.ld CORE_LINK_INPUTS="..."
+#
+# Run from ps5/coreorbis, as Makefile.vk is: this file includes it for PCSX2's source
+# lists and rules, so the core follows the app's sources as they change upstream. What
+# the core leaves out is the app around the emulator: the shelf and settings page
+# (ps5/frontend), the app's own audio, input, presentation, notifications and
+# achievements (RetroArch does those), the disc-drive and NFS tools, and the elevation
+# client (ProsperoHenJailbreak). PS5_RetroArch's tools/build-ps5sx2.sh supplies the
+# paths, the core linker script and the runtime objects every core links.
+
+OBJDIR := obj-libretro
+include Makefile.vk
+
+# A shared object loaded by PS5 RetroArch's native loader: position-independent, the
+# libretro entry points exported, everything else hidden.
+CXXFLAGS += -fPIC -DLIBRETRO=1 -I$(VK_MAKEFILE_DIR)../libretro -I$(VK_MAKEFILE_DIR)../libretro/include
+CFLAGS += -fPIC -DLIBRETRO=1
+GLSLANG_BUILD ?= $(GLSLANG)/build-ps5
+
+# The app's shims the core keeps: PCSX2's platform plumbing on the console. Not kept: the
+# directory and memory shims (dirshim, orbismem, mmapshim), whose work PS5 RetroArch's
+# platform layer does for every core (opendir, executable memory), and the rest of the app
+# (ps5/libretro/LibretroApp.cpp answers its calls).
+LR_SHIM_SRCS := ./orbis-shims/cpuinfo_stubs.cpp \
+  ./orbis-shims/ProsperoMisc.cpp ./orbis-shims/ProsperoCDVD.cpp ./orbis-shims/ProsperoNet.cpp \
+  ./orbis-shims/ProsperoZip.cpp ./orbis-shims/ProsperoDiscord.cpp ./orbis-shims/ProsperoSaveState.cpp \
+  ./orbis-shims/ProsperoGS.cpp ./orbis-shims/ProsperoUI.cpp ./orbis-shims/stubs.cpp \
+  ./orbis-shims/orbis_paths.cpp ./orbis-shims/orbis_vk.cpp \
+  ./orbis-shims/ps5_shaderc.cpp ./orbis-shims/orbis_gs_shaders.cpp ./orbis-shims/ProsperoInput.cpp \
+  ./orbis-shims/ps5_framegen.cpp
+LR_SHIM_ASM := ./orbis-shims/ProsperoTLS.S
+
+# The libretro side (ps5/libretro).
+LR_DIR := $(VK_MAKEFILE_DIR)../libretro
+LR_SRCS := $(wildcard $(LR_DIR)/*.cpp)
+
+# The app's C libraries the core does not use: the texture packs' libarchive, the
+# frontend's mbedTLS, libnfs.
+LR_C_SRCS := $(filter-out $(LIBARCHIVE_CSRCS) $(MBEDTLS_CSRCS) $(NFS_CSRCS),$(C_SRCS))
+
+# The app's host (StubHost.cpp) is replaced by the core's (LibretroHost.cpp).
+LR_CXX_SRCS := $(filter-out %/tests/ctest/core/StubHost.cpp,$(SRCS))
+
+LR_OBJS := $(patsubst $(PCSX2)/%.cpp,$(OBJDIR)/%.o,$(filter %.cpp,$(LR_CXX_SRCS))) \
+  $(patsubst $(PCSX2)/%.cc,$(OBJDIR)/%.o,$(filter %.cc,$(LR_CXX_SRCS))) \
+  $(patsubst $(RYML)/%.cpp,$(OBJDIR)/ryml/%.o,$(RYML_SRCS)) \
+  $(patsubst ./%.cpp,$(OBJDIR)/shim/%.o,$(LR_SHIM_SRCS)) \
+  $(patsubst ./%.S,$(OBJDIR)/shim/%.o,$(LR_SHIM_ASM)) \
+  $(patsubst $(PCSX2)/%.c,$(OBJDIR)/%.o,$(LR_C_SRCS)) \
+  $(patsubst $(LR_DIR)/%.cpp,$(OBJDIR)/libretro/%.o,$(LR_SRCS))
+
+# ImGui's default "open in shell" forks a process; a core has no shell to open.
+$(OBJDIR)/3rdparty/imgui/src/imgui.o: CXXFLAGS += -DIMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS
+
+$(OBJDIR)/libretro/%.o: $(LR_DIR)/%.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+CORE := $(OBJDIR)/ps5sx2_libretro.so
+GLSLANG_LIBS := $(GLSLANG_BUILD)/glslang/libglslang.a $(GLSLANG_BUILD)/glslang/libglslang-default-resource-limits.a
+
+$(CORE): $(LR_OBJS) $(CORE_LDSCRIPT)
+	@echo "  LINK  $@"
+	@$(CXX) -shared -fPIC -nostdlib -nodefaultlibs -Wl,-z,undefs -Wl,--build-id=sha1 \
+	  -Wl,-T,$(CORE_LDSCRIPT) -Wl,--gc-sections -o $@ $(LR_OBJS) $(CORE_LINK_INPUTS) \
+	  -Wl,--start-group $(GLSLANG_LIBS) -Wl,--end-group \
+	  -lkernel_web -lSceLibcInternal -lScePosixForWebKit
+
+core: $(CORE)
+	@echo "CORE OK: $(CORE), $(words $(LR_OBJS)) objects"
+
+.DEFAULT_GOAL := core
+.PHONY: core

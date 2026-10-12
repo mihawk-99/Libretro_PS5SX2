@@ -125,3 +125,6 @@ CMakeSettings.json
 /ci-artifacts/
 /out/
 /.cache/
+
+# Libretro_PS5SX2: the core build (ps5/libretro/Makefile.libretro)
+/ps5/coreorbis/obj-libretro/

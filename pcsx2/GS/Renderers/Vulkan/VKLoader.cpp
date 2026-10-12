@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "GS/Renderers/Vulkan/VKLoader.h"
+#ifdef LIBRETRO
+#include "libretro_gs.h"
+#endif
 
 #include "common/Assertions.h"
 #include "common/Console.h"
@@ -54,7 +57,13 @@ bool Vulkan::IsVulkanLibraryLoaded()
 bool Vulkan::LoadVulkanLibrary(Error* error)
 {
 	pxAssertRel(!s_vulkan_library_loaded, "Vulkan module is not loaded.");
+#ifdef LIBRETRO
+	// Libretro_PS5SX2: the driver is RetroArch's, reached through the entry point it passes
+	// to the core (ps5/libretro/LibretroVulkan.cpp).
+	vkGetInstanceProcAddr = LibretroGS::GetInstanceProcAddr;
+#else
 	vkGetInstanceProcAddr = vk_icdGetInstanceProcAddr;
+#endif
 
 	// With no instance, an ICD answers only the global commands. vkDestroyInstance is
 	// a module export of the desktop loader but an instance command of the driver:

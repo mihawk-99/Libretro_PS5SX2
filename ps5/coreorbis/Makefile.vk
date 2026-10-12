@@ -430,7 +430,7 @@ USB_SRCS := $(PCSX2)/pcsx2/USB/USB.cpp \
 
 SRCS := $(SRCS) $(COMMON_SRCS) $(USB_SRCS) $(PCSX2)/tests/ctest/core/StubHost.cpp
 
-OBJDIR := obj-vk
+OBJDIR ?= obj-vk
 OBJS := $(patsubst $(PCSX2)/%.cpp,$(OBJDIR)/%.o,$(filter %.cpp,$(SRCS))) \
   $(patsubst $(PCSX2)/%.cc,$(OBJDIR)/%.o,$(filter %.cc,$(SRCS))) \
   $(patsubst $(RYML)/%.cpp,$(OBJDIR)/ryml/%.o,$(RYML_SRCS)) \
