@@ -113,6 +113,12 @@ extern "C" int g_orbis_code_direct = 0;
 extern "C" int sceKernelMprotect(const void* addr, unsigned long long len, int prot);
 extern "C" int sceKernelMunmap(void* addr, unsigned long long len);
 
+#ifdef LIBRETRO
+#include <ps5platform/exec.h>
+// Libretro_PS5SX2: the code area's region (ps5_exec_alloc), freed with the memory map.
+static ps5_exec_region s_lr_code_region;
+#endif
+
 bool SysMemory::AllocateMemoryMap()
 {
 	Console.WriteLn("[dbg] memmap: MainSize=%u CodeSize=%u", HostMemoryMap::MainSize, HostMemoryMap::CodeSize);
@@ -148,9 +154,30 @@ bool SysMemory::AllocateMemoryMap()
 			g_orbis_data_phys = phys;
 			u8* code = nullptr;
 			int rcc = -1, rcc2 = -1;
+#ifdef LIBRETRO
+			// Libretro_PS5SX2: the recompilers' code reaches the core's functions and globals with
+			// 32-bit displacements, so it goes within 2 GiB of the core's own code, wherever the
+			// title loaded the core: PS5 RetroArch's platform layer places it there (direct
+			// memory, read, write and execute).
+			{
+				const ps5_exec_request request = {static_cast<size_t>(code_size), 0,
+					reinterpret_cast<uintptr_t>(&SysMemory::AllocateMemoryMap), PS5_EXEC_NEAR};
+				const int rx = ps5_exec_alloc(&request, &s_lr_code_region);
+				printf("[dbg] memmap: code near the core %llu MiB: rc=0x%x addr=%p (anchor %p)\n", code_size >> 20,
+					(unsigned)rx, rx == 0 ? s_lr_code_region.base : nullptr, (void*)&SysMemory::AllocateMemoryMap);
+				fflush(stdout);
+				if (rx == 0)
+				{
+					code = static_cast<u8*>(s_lr_code_region.base);
+					rcc = rcc2 = 0;
+				}
+			}
+			if (!code && g_orbis_code_direct)
+#else
 			// vk-285-64: direct memory made executable (g_orbis_code_direct), at the address the JIT
 			// shared memory had, rounded to 2 MiB so the kernel can use large pages.
 			if (g_orbis_code_direct)
+#endif
 			{
 				const unsigned long long big = 0x200000ULL;
 				const unsigned long long code_bytes = (code_size + big - 1) & ~(big - 1);
@@ -258,6 +285,25 @@ void SysMemory::DumpMemoryMap()
 
 void SysMemory::ReleaseMemoryMap()
 {
+#ifdef LIBRETRO
+	// Libretro_PS5SX2: the core is unloaded and loaded again in the same process, so the
+	// direct memory the map took goes back: the code region, then the data block.
+	if (s_lr_code_region.base)
+	{
+		ps5_exec_free(&s_lr_code_region);
+		s_lr_code_region = {};
+		s_code_memory = nullptr;
+	}
+	if (s_data_memory && g_orbis_data_phys >= 0)
+	{
+		sceKernelMunmap(s_data_memory, HostMemoryMap::MainSize);
+		sceKernelReleaseDirectMemory(g_orbis_data_phys, HostMemoryMap::MainSize);
+		s_data_memory = nullptr;
+		g_orbis_data_phys = -1;
+	}
+	if (!s_memory_mapping_area)
+		return;
+#endif
 	if (s_code_memory)
 	{
 		s_memory_mapping_area->Unmap(s_code_memory, HostMemoryMap::CodeSize, false);

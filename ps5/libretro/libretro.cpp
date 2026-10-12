@@ -52,7 +52,6 @@
 
 #define LR_EXPORT extern "C" __attribute__((visibility("default")))
 
-extern "C" int g_orbis_code_direct; // Memory.cpp: the recompilers' code in direct memory made executable
 
 static retro_environment_t environ_cb;
 static retro_video_refresh_t video_cb;
@@ -277,7 +276,6 @@ void lr_cpu_thread_pump()
 static void cpu_thread_main()
 {
 	Error err;
-	g_orbis_code_direct = 1;
 	if (!PageFaultHandler::Install(&err))
 		lr_logf(LR_LOG_WARN, "page fault handler: %s", err.GetDescription().c_str());
 
