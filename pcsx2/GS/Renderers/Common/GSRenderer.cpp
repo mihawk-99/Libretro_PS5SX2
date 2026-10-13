@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
+#ifdef LIBRETRO
+#include "libretro_gs.h"
+#endif
 #include "ImGui/FullscreenUI.h"
 #include "OrbisEEDiag.h" // vk-285-100
 #include "ImGui/ImGuiManager.h"
@@ -2735,6 +2738,9 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 	if (!g_gs_device)
 		return;
 
+#ifdef LIBRETRO
+	LibretroGS::NoteVsync(); // Libretro_PS5SX2: the vsyncs a frame handed to RetroArch covers
+#endif
 	OrbisVsBegin(); // vk-285-106
 	OrbisLiveTune(); // eerec-278
 	ORBIS_VS_MARK(ORBIS_VS_TUNE);

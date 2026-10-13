@@ -40,6 +40,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdarg>
 #include <cstdio>
@@ -152,6 +153,11 @@ static void apply_options(SettingsInterface& si)
 	const bool software = option("ps5sx2_renderer", "hardware") == "software";
 	si.SetIntValue("EmuCore/GS", "Renderer", static_cast<int>(software ? GSRendererType::SW : GSRendererType::VK));
 	si.SetBoolValue("EmuCore", "EnableFastBoot", option("ps5sx2_fast_boot", "enabled") == "enabled");
+	{
+		// PCSX2's dithering_ps2: 0 off, 1 scaled, 2 unscaled, 3 force 32-bit
+		const std::string dither = option("ps5sx2_dithering", "scaled");
+		si.SetIntValue("EmuCore/GS", "dithering_ps2", dither == "off" ? 0 : dither == "unscaled" ? 2 : dither == "force32" ? 3 : 1);
+	}
 }
 
 static void build_settings(const std::string& bios)
@@ -465,6 +471,11 @@ LR_EXPORT void retro_set_environment(retro_environment_t cb)
 	static const retro_controller_description pads[] = {{"DualShock 2", RETRO_DEVICE_ANALOG}};
 	static const retro_controller_info ports[] = {{pads, 1}, {pads, 1}, {nullptr, 0}};
 	cb(RETRO_ENVIRONMENT_SET_CONTROLLER_INFO, const_cast<retro_controller_info*>(ports));
+	// Private to the PS5 port of RetroArch (an unknown command elsewhere): this core blocks in retro_run until the GS has made
+	// its next frame, so a game slower than the declared rate arrives as one call for each frame. The frame generation then
+	// places its pictures by the clock instead of by the calls.
+	bool blocks = true;
+	cb(0x25001, &blocks);
 }
 
 LR_EXPORT void retro_set_video_refresh(retro_video_refresh_t cb)
@@ -651,16 +662,44 @@ LR_EXPORT void retro_run(void)
 		run_on_cpu_and_wait([]() { VMManager::ApplySettings(); });
 	}
 
+	// How the time of a call divides (logged every two seconds): input, the frame (waiting for it and RetroArch's
+	// video callback), and the audio RetroArch takes, which blocks when its buffer is full.
+	using clock = std::chrono::steady_clock;
+	static double s_input_ms, s_video_ms, s_audio_ms, s_audio_max_ms;
+	static unsigned s_calls, s_audio_batches;
+	static clock::time_point s_since = clock::now();
+	const clock::time_point t0 = clock::now();
 	poll_input();
+	const clock::time_point t1 = clock::now();
 
 	// The frame the GS finished, or the last one again.
 	if (!lr_vk_present(video_cb, 50))
 		video_cb(nullptr, 0, 0, 0);
+	const clock::time_point t2 = clock::now();
 
 	static int16_t samples[48000 / 30 * 2];
 	unsigned frames;
 	while ((frames = lr_audio_read(samples, sizeof(samples) / sizeof(samples[0]) / 2)) > 0)
+	{
+		const clock::time_point a0 = clock::now();
 		audio_batch_cb(samples, frames);
+		const double took = std::chrono::duration<double, std::milli>(clock::now() - a0).count();
+		s_audio_max_ms = std::max(s_audio_max_ms, took);
+		s_audio_batches++;
+	}
+	const clock::time_point t3 = clock::now();
+	s_input_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
+	s_video_ms += std::chrono::duration<double, std::milli>(t2 - t1).count();
+	s_audio_ms += std::chrono::duration<double, std::milli>(t3 - t2).count();
+	s_calls++;
+	if (t3 - s_since >= std::chrono::seconds(2))
+	{
+		lr_logf(LR_LOG_INFO, "retro_run %u calls: input %.1f ms, frame %.1f ms, audio %.1f ms (%u batches, longest %.2f ms)", s_calls,
+			s_input_ms, s_video_ms, s_audio_ms, s_audio_batches, s_audio_max_ms);
+		s_input_ms = s_video_ms = s_audio_ms = s_audio_max_ms = 0.0;
+		s_calls = s_audio_batches = 0;
+		s_since = t3;
+	}
 }
 
 // Save states: PCSX2's state in the flat format PS5SX2 writes to files, made and read on

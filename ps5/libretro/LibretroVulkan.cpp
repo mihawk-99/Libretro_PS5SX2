@@ -8,6 +8,9 @@
 #include "libretro.h"
 #include "libretro_vulkan.h"
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstring>
 #include <mutex>
@@ -39,16 +42,44 @@ PFN_vkDeviceWaitIdle s_device_wait_idle = nullptr;
 retro_hw_render_interface_vulkan* s_iface = nullptr;
 std::mutex s_queue_mutex;
 
+// What the hand-over costs, logged every two seconds from retro_run (the time spent waiting for the queue
+// RetroArch shares, the time in the submits that hold it, the GS waiting for a free slot, retro_run waiting
+// for a frame and for RetroArch's last use of an image): to tell which side holds the other up.
+struct Stats
+{
+	std::atomic<uint64_t> lock_wait_ns{0}, lock_wait_max_ns{0}, lock_calls{0};
+	std::atomic<uint64_t> submit_ns{0}, submit_max_ns{0};
+	std::atomic<uint64_t> slot_wait_ns{0}, slot_wait_max_ns{0}, published{0};
+	std::atomic<uint64_t> frame_wait_ns{0}, sync_wait_ns{0}, sync_wait_max_ns{0}, dupes{0}, taken{0};
+};
+Stats s_stats;
+inline uint64_t now_ns()
+{
+	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+inline void note_max(std::atomic<uint64_t>& max, uint64_t value)
+{
+	uint64_t seen = max.load(std::memory_order_relaxed);
+	while (value > seen && !max.compare_exchange_weak(seen, value, std::memory_order_relaxed))
+	{
+	}
+}
+
 struct QueueLock
 {
 	retro_hw_render_interface_vulkan* iface;
 	QueueLock()
 		: iface(s_iface)
 	{
+		const uint64_t t0 = now_ns();
 		if (iface)
 			iface->lock_queue(iface->handle);
 		else
 			s_queue_mutex.lock();
+		const uint64_t waited = now_ns() - t0;
+		s_stats.lock_wait_ns += waited;
+		s_stats.lock_calls++;
+		note_max(s_stats.lock_wait_max_ns, waited);
 	}
 	~QueueLock()
 	{
@@ -125,7 +156,12 @@ VKAPI_ATTR VkResult VKAPI_CALL create_device(VkPhysicalDevice gpu, const VkDevic
 VKAPI_ATTR VkResult VKAPI_CALL queue_submit(VkQueue queue, uint32_t count, const VkSubmitInfo* submits, VkFence fence)
 {
 	QueueLock lock;
-	return s_queue_submit(queue, count, submits, fence);
+	const uint64_t t0 = now_ns();
+	const VkResult res = s_queue_submit(queue, count, submits, fence);
+	const uint64_t took = now_ns() - t0;
+	s_stats.submit_ns += took;
+	note_max(s_stats.submit_max_ns, took);
+	return res;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL queue_submit2(VkQueue queue, uint32_t count, const VkSubmitInfo2* submits, VkFence fence)
@@ -190,10 +226,17 @@ struct Slot
 {
 	SlotState state = SlotState::Free;
 	unsigned sync = 0;
+	unsigned vsyncs = 1; // emulated vsyncs from the frame published before this one to this
+	uint64_t period_ns = 0; // the time the GS took to make it, without what it waited for a free slot (0: not known)
 	unsigned width = 0, height = 0;
 	retro_vulkan_image image = {};
 };
 
+std::atomic<unsigned> s_vsync_count{0};
+// The GS thread's own bookkeeping of when a frame was ready and what it waited for a slot: the period of the frames the
+// GS makes, apart from the pace RetroArch sets by taking them (a frame is published once the last was taken).
+uint64_t s_ready_ns = 0, s_wait_ns = 0, s_prev_ready_ns = 0, s_prev_wait_ns = 0;
+retro_environment_t s_environ = nullptr;
 std::mutex s_slots_mutex;
 std::condition_variable s_slots_cv;
 Slot s_slots[LibretroGS::HANDOVER_SLOTS];
@@ -235,6 +278,8 @@ PFN_vkVoidFunction VKAPI_CALL LibretroGS::GetInstanceProcAddr(VkInstance instanc
 int LibretroGS::AcquireHandoverSlot()
 {
 	std::unique_lock<std::mutex> lock(s_slots_mutex);
+	const uint64_t wait_start = now_ns();
+	s_ready_ns = wait_start;
 	for (;;)
 	{
 		if (s_stopping)
@@ -247,6 +292,10 @@ int LibretroGS::AcquireHandoverSlot()
 				if (s_slots[i].state == SlotState::Free)
 				{
 					s_slots[i].state = SlotState::Writing;
+					const uint64_t waited = now_ns() - wait_start;
+					s_wait_ns = waited;
+					s_stats.slot_wait_ns += waited;
+					note_max(s_stats.slot_wait_max_ns, waited);
 					return i;
 				}
 			}
@@ -260,6 +309,11 @@ void LibretroGS::ReleaseHandoverSlot(int slot)
 	std::lock_guard<std::mutex> lock(s_slots_mutex);
 	s_slots[slot].state = SlotState::Free;
 	s_slots_cv.notify_all();
+}
+
+void LibretroGS::NoteVsync()
+{
+	s_vsync_count.fetch_add(1, std::memory_order_relaxed);
 }
 
 void LibretroGS::PublishHandoverSlot(int slot, VkImage image, VkImageView view, VkFormat format, unsigned width, unsigned height)
@@ -282,10 +336,21 @@ void LibretroGS::PublishHandoverSlot(int slot, VkImage image, VkImageView view, 
 		{VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
 			VK_COMPONENT_SWIZZLE_IDENTITY},
 		{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+	// The vsyncs this frame covers: those since the last one published, and those of a frame it replaces.
+	s.vsyncs = std::max(1u, s_vsync_count.exchange(0, std::memory_order_relaxed)) + (s_waiting >= 0 ? s_slots[s_waiting].vsyncs : 0);
+	{
+		const uint64_t gap = s_prev_ready_ns && s_ready_ns > s_prev_ready_ns ? s_ready_ns - s_prev_ready_ns : 0;
+		s.period_ns = gap > s_prev_wait_ns ? gap - s_prev_wait_ns : 0;
+		if (s_waiting >= 0)
+			s.period_ns += s_slots[s_waiting].period_ns;
+		s_prev_ready_ns = s_ready_ns;
+		s_prev_wait_ns = s_wait_ns;
+	}
 	// A frame still waiting (unpaced: fast forward, a save state) is replaced by this one.
 	if (s_waiting >= 0)
 		s_slots[s_waiting].state = SlotState::Free;
 	s.state = SlotState::Waiting;
+	s_stats.published++;
 	s_waiting = slot;
 	s_slots_cv.notify_all();
 }
@@ -299,16 +364,48 @@ bool lr_vk_present(retro_video_refresh_t video_cb, int wait_ms)
 	int slot;
 	{
 		std::unique_lock<std::mutex> lock(s_slots_mutex);
+		const uint64_t t0 = now_ns();
 		if (s_waiting < 0 && wait_ms > 0)
 			s_slots_cv.wait_for(lock, std::chrono::milliseconds(wait_ms), [] { return s_waiting >= 0 || s_stopping; });
+		s_stats.frame_wait_ns += now_ns() - t0;
 		slot = s_waiting;
 		if (slot < 0)
+		{
+			s_stats.dupes++;
 			return false;
+		}
 	}
 
 	// The index RetroArch is about to use: once it has finished with what that index
 	// showed last time, that image is free again.
+	const uint64_t sync_t0 = now_ns();
 	iface->wait_sync_index(iface->handle);
+	{
+		const uint64_t waited = now_ns() - sync_t0;
+		s_stats.sync_wait_ns += waited;
+		note_max(s_stats.sync_wait_max_ns, waited);
+	}
+	s_stats.taken++;
+	{
+		static uint64_t last_log = 0;
+		const uint64_t now = now_ns();
+		if (!last_log)
+			last_log = now;
+		if (now - last_log >= 2000000000ull)
+		{
+			const double sec = double(now - last_log) / 1e9;
+			auto ms = [](std::atomic<uint64_t>& v) { return double(v.exchange(0)) / 1e6; };
+			const uint64_t calls = s_stats.lock_calls.exchange(0);
+			lr_logf(LR_LOG_INFO,
+				"handover %.1fs: taken %llu dupes %llu published %llu | queue lock: %llu calls, waited %.1f ms (max %.2f), submits held it %.1f ms (max %.2f) | GS waited %.1f ms for a slot (max %.2f) | retro_run waited %.1f ms for a frame, %.1f ms (max %.2f) for the sync index",
+				sec, (unsigned long long)s_stats.taken.exchange(0), (unsigned long long)s_stats.dupes.exchange(0),
+				(unsigned long long)s_stats.published.exchange(0), (unsigned long long)calls, ms(s_stats.lock_wait_ns),
+				double(s_stats.lock_wait_max_ns.exchange(0)) / 1e6, ms(s_stats.submit_ns), double(s_stats.submit_max_ns.exchange(0)) / 1e6,
+				ms(s_stats.slot_wait_ns), double(s_stats.slot_wait_max_ns.exchange(0)) / 1e6, ms(s_stats.frame_wait_ns),
+				ms(s_stats.sync_wait_ns), double(s_stats.sync_wait_max_ns.exchange(0)) / 1e6);
+			last_log = now;
+		}
+	}
 	const unsigned sync = iface->get_sync_index(iface->handle);
 
 	std::lock_guard<std::mutex> lock(s_slots_mutex);
@@ -324,6 +421,13 @@ bool lr_vk_present(retro_video_refresh_t video_cb, int wait_ms)
 	s.sync = sync;
 	s_waiting = -1;
 	iface->set_image(iface->handle, &s.image, 0, nullptr, iface->queue_index);
+	// Private to the PS5 port of RetroArch: how many emulated vsyncs this frame covers (unknown elsewhere: ignored).
+	if (s_environ)
+	{
+		// {the vsyncs the frame covers, the microseconds the GS took to make it (0: not known)}
+		unsigned info[2] = {s.vsyncs, static_cast<unsigned>(std::min<uint64_t>(s.period_ns / 1000, 2000000))};
+		s_environ(0x25002, info);
+	}
 	video_cb(RETRO_HW_FRAME_BUFFER_VALID, s.width, s.height, 0);
 	s_slots_cv.notify_all();
 	return true;
@@ -418,6 +522,7 @@ static retro_hw_render_context_negotiation_interface_vulkan s_negotiation = {
 
 bool lr_vk_negotiate(retro_environment_t environ_cb)
 {
+	s_environ = environ_cb;
 	// Version 1: create_device, which hands over the frontend's required features.
 	s_negotiation.interface_version = 1;
 	return environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE, &s_negotiation);

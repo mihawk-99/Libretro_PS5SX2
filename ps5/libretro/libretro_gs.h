@@ -31,6 +31,9 @@ PFN_vkVoidFunction VKAPI_CALL GetInstanceProcAddr(VkInstance instance, const cha
 // then the frame published once its copy is submitted. Width and height are the image's.
 int AcquireHandoverSlot();
 void PublishHandoverSlot(int slot, VkImage image, VkImageView view, VkFormat format, unsigned width, unsigned height);
+// Called at every emulated vsync (GSRenderer::VSync), whether or not a frame is presented: a published frame carries the
+// vsyncs since the one before it, which RetroArch's frame generation places its pictures by.
+void NoteVsync();
 // Abandons a slot acquired but not published.
 void ReleaseHandoverSlot(int slot);
 // Slots a GSDeviceVK keeps an image for.
